@@ -1,7 +1,14 @@
 [package]
 name = "monolake-services"
 version = "0.3.2"
-edition = "2021"
+description = "MonoLake Services Implementation"
+
+authors.workspace = true
+categories.workspace = true
+edition.workspace = true
+keywords.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [features]
 default = []
@@ -32,8 +39,9 @@ hyper = [
 ]
 
 [dependencies]
+monolake-core = { version = "0.3.0", path = "../monolake-core" }
+
 monoio = { workspace = true, features = ['splice'] }
-monolake-core = { path = "../monolake-core" }
 monoio-codec = { workspace = true }
 monoio-http = { workspace = true, features = ["encoding"] }
 monoio-thrift = { workspace = true }
@@ -43,11 +51,6 @@ monoio-transports = { workspace = true, features = [
 ] }
 local-sync = { workspace = true }
 service-async = { workspace = true }
-http = { workspace = true }
-anyhow = { workspace = true }
-thiserror = { workspace = true }
-serde = { workspace = true }
-tracing = { workspace = true }
 certain-map = { workspace = true }
 
 # tls
@@ -73,7 +76,11 @@ monoio-compat = { version = "0.2.2", features = ["hyper"], optional = true }
 
 # common
 bytes = { workspace = true }
-# async-channel = "1"
+http = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
 rand = "0.8"
 matchit = "0.8"
 pin-project-lite = "0.2"
