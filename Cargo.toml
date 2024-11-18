@@ -4,9 +4,9 @@ resolver = "2"
 
 [workspace.package]
 authors = [
-    "ihciah <ihciah@gmail.com>",
-    "Rain Jiang <rain-jiang@outlook.com>",
-    "Harsha <har23k@gmail.com>",
+    "ihciah <chihai.hain@bytedance.com>",
+    "Rain Jiang <rain.jiang@bytedance.com>",
+    "Harsha <harsha.manivannan@bytedance.com>",
     "Xiaosong Yang <xiaosong.yang@bytedance.com>",
     "Kingtous <kingtous@qq.com>",
 ]
@@ -17,7 +17,7 @@ license = "MIT/Apache-2.0"
 repository = "https://github.com/cloudwego/monolake"
 
 [workspace.dependencies]
-monoio = "0.2.2"
+monoio = "0.2.4"
 monoio-codec = "0.3"
 monoio-http = "0.3.5"
 monoio-thrift = "0.1.1"
