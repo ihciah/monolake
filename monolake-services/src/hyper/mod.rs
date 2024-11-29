@@ -141,7 +141,7 @@ where
     fn call(&self, req: Request<Incoming>) -> Self::Future {
         let chain = self.handler_chain.clone();
         let cx = self.cx.clone();
-        async move { chain.handle(req, cx).await.map(|r| r.0) }
+        async move { chain.handle(req, cx).await }
     }
 }
 

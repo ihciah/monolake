@@ -53,7 +53,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use http::{header, HeaderMap, HeaderValue, Request, StatusCode};
+use http::{header, HeaderMap, HeaderValue, Request, Response, StatusCode};
 use monoio::net::TcpStream;
 use monoio_http::common::{
     body::{Body, HttpBody},
@@ -67,7 +67,6 @@ use monoio_transports::{
 };
 use monolake_core::{
     context::{PeerAddr, RemoteAddr},
-    http::ResponseWithContinue,
     listener::AcceptedAddr,
 };
 use service_async::{AsyncMakeService, MakeService, ParamMaybeRef, ParamRef, Service};
@@ -138,11 +137,10 @@ impl UpstreamHandler {
 impl<CX, B> Service<(Request<B>, CX)> for UpstreamHandler
 where
     CX: ParamRef<PeerAddr> + ParamMaybeRef<Option<RemoteAddr>>,
-    // B: Body,
     B: Body<Data = Bytes, Error = HttpError>,
     HttpError: From<B::Error>,
 {
-    type Response = ResponseWithContinue<HttpBody>;
+    type Response = Response<HttpBody>;
     type Error = Infallible;
 
     async fn call(&self, (mut req, ctx): (Request<B>, CX)) -> Result<Self::Response, Self::Error> {
@@ -159,26 +157,26 @@ impl UpstreamHandler {
     async fn send_http_request<B>(
         &self,
         mut req: Request<B>,
-    ) -> Result<ResponseWithContinue<HttpBody>, Infallible>
+    ) -> Result<Response<HttpBody>, Infallible>
     where
         B: Body<Data = Bytes, Error = HttpError>,
         HttpError: From<B::Error>,
     {
         let Some(host) = req.uri().host() else {
             info!("invalid uri which does not contain host: {:?}", req.uri());
-            return Ok((generate_response(StatusCode::BAD_REQUEST, true), true));
+            return Ok(generate_response(StatusCode::BAD_REQUEST, true));
         };
         let port = req.uri().port_u16().unwrap_or(80);
         let mut iter = match (host, port).to_socket_addrs() {
             Ok(iter) => iter,
             Err(e) => {
                 info!("convert invalid uri: {:?} with error: {:?}", req.uri(), e);
-                return Ok((generate_response(StatusCode::BAD_REQUEST, true), true));
+                return Ok(generate_response(StatusCode::BAD_REQUEST, true));
             }
         };
         let Some(key) = iter.next() else {
             info!("unable to resolve host: {host}");
-            return Ok((generate_response(StatusCode::BAD_REQUEST, true), true));
+            return Ok(generate_response(StatusCode::BAD_REQUEST, true));
         };
         debug!("key: {:?}", key);
         let mut conn = match self.http_connector.connect(key).await {
@@ -196,23 +194,20 @@ impl UpstreamHandler {
             }
             Err(e) => {
                 info!("connect upstream error: {:?}", e);
-                return Ok((generate_response(StatusCode::BAD_GATEWAY, true), true));
+                return Ok(generate_response(StatusCode::BAD_GATEWAY, true));
             }
         };
 
         match conn.send_request(req).await {
-            (Ok(resp), _) => Ok((resp, true)),
+            (Ok(resp), _) => Ok(resp),
             // Bad gateway should not affect inbound connection.
             // It should still be keepalive.
-            (Err(_e), _) => Ok((generate_response(StatusCode::BAD_GATEWAY, false), true)),
+            (Err(_e), _) => Ok(generate_response(StatusCode::BAD_GATEWAY, false)),
         }
     }
 
     #[cfg(feature = "tls")]
-    async fn send_https_request<B>(
-        &self,
-        req: Request<B>,
-    ) -> Result<ResponseWithContinue<HttpBody>, Infallible>
+    async fn send_https_request<B>(&self, req: Request<B>) -> Result<Response<HttpBody>, Infallible>
     where
         B: Body<Data = Bytes, Error = HttpError>,
         HttpError: From<B::Error>,
@@ -221,7 +216,7 @@ impl UpstreamHandler {
             Ok(key) => key,
             Err(e) => {
                 info!("convert invalid uri: {:?} with error: {:?}", req.uri(), e);
-                return Ok((generate_response(StatusCode::BAD_REQUEST, true), true));
+                return Ok(generate_response(StatusCode::BAD_REQUEST, true));
             }
         };
         debug!("key: {:?}", key);
@@ -233,7 +228,7 @@ impl UpstreamHandler {
                     Ok(x) => x,
                     Err(_) => {
                         info!("connect upstream timeout");
-                        return Ok((generate_response(StatusCode::BAD_GATEWAY, true), true));
+                        return Ok(generate_response(StatusCode::BAD_GATEWAY, true));
                     }
                 }
             }
@@ -244,15 +239,15 @@ impl UpstreamHandler {
             Ok(conn) => conn,
             Err(e) => {
                 info!("connect upstream error: {:?}", e);
-                return Ok((generate_response(StatusCode::BAD_GATEWAY, true), true));
+                return Ok(generate_response(StatusCode::BAD_GATEWAY, true));
             }
         };
 
         match conn.send_request(req).await {
-            (Ok(resp), _) => Ok((resp, true)),
+            (Ok(resp), _) => Ok(resp),
             // Bad gateway should not affect inbound connection.
             // It should still be keepalive.
-            (Err(_e), _) => Ok((generate_response(StatusCode::BAD_GATEWAY, false), true)),
+            (Err(_e), _) => Ok(generate_response(StatusCode::BAD_GATEWAY, false)),
         }
     }
 }

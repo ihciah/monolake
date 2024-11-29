@@ -18,7 +18,7 @@
 //! that implement the [`Service`] trait with
 //! request type `(Request<B>, CX)` and return type
 //! [`ResponseWithContinue`].
-use std::future::Future;
+use std::{convert::Infallible, future::Future};
 
 use http::{Request, Response};
 use service_async::Service;
@@ -47,6 +47,23 @@ pub trait HttpError<B> {
     /// If an error can be turned to an HTTP response, it means the error is
     /// a recoverable error and the connection can be kept alive.
     fn to_response(&self) -> Option<Response<B>>;
+
+    /// A helper function to check if an error is recoverable.
+    /// Manually implement this function has better performance.
+    /// Makes sure if returns true, `to_response` must return Some.
+    /// And if returns false, `to_response` must return None.
+    fn is_recoverable(&self) -> bool {
+        self.to_response().is_some()
+    }
+}
+
+impl<B> HttpError<B> for Infallible {
+    fn to_response(&self) -> Option<Response<B>> {
+        match *self {}
+    }
+    fn is_recoverable(&self) -> bool {
+        match *self {}
+    }
 }
 
 #[derive(Debug, Clone, Default, Copy, PartialEq, Eq)]
@@ -55,6 +72,9 @@ impl<B, E> HttpError<B> for HttpFatalError<E> {
     #[inline]
     fn to_response(&self) -> Option<Response<B>> {
         None
+    }
+    fn is_recoverable(&self) -> bool {
+        false
     }
 }
 
@@ -128,26 +148,22 @@ pub trait HttpHandler<CX, B>: SealedT<HttpSeal, (CX, B)> {
         &self,
         request: Request<B>,
         ctx: CX,
-    ) -> impl Future<Output = Result<ResponseWithContinue<Self::Body>, Self::Error>>;
+    ) -> impl Future<Output = Result<Response<Self::Body>, Self::Error>>;
 }
 
 impl<T, CX, IB, OB> SealedT<HttpSeal, (CX, IB)> for T where
-    T: Service<(Request<IB>, CX), Response = ResponseWithContinue<OB>>
+    T: Service<(Request<IB>, CX), Response = OB>
 {
 }
 
 impl<T, CX, IB, OB> HttpHandler<CX, IB> for T
 where
-    T: Service<(Request<IB>, CX), Response = ResponseWithContinue<OB>>,
+    T: Service<(Request<IB>, CX), Response = Response<OB>>,
 {
     type Body = OB;
     type Error = T::Error;
 
-    async fn handle(
-        &self,
-        req: Request<IB>,
-        ctx: CX,
-    ) -> Result<ResponseWithContinue<OB>, Self::Error> {
+    async fn handle(&self, req: Request<IB>, ctx: CX) -> Result<Response<OB>, Self::Error> {
         self.call((req, ctx)).await
     }
 }

@@ -80,13 +80,13 @@ use monoio_http::common::{
     body::{BodyEncodeExt, FixedBody},
     response::Response,
 };
-use monolake_core::http::{HttpHandler, ResponseWithContinue};
+use monolake_core::http::HttpHandler;
 use service_async::{
     layer::{layer_fn, FactoryLayer},
     AsyncMakeService, MakeService, Service,
 };
 
-use crate::http::generate_response;
+use crate::http::util::generate_empty_response;
 
 /// Handles content encoding and decoding for HTTP requests and responses.
 ///
@@ -110,7 +110,7 @@ where
     B::EncodeDecodeError: Debug,
     <H::Body as BodyEncodeExt>::EncodeDecodeError: Debug,
 {
-    type Response = ResponseWithContinue<H::Body>;
+    type Response = Response<H::Body>;
     type Error = H::Error;
 
     async fn call(&self, (request, ctx): (Request<B>, CX)) -> Result<Self::Response, Self::Error> {
@@ -136,15 +136,14 @@ where
             .unwrap_or_default();
 
         if content_length == 0 || content_encoding == "identity" {
-            let (response, _) = self.inner.handle(request, ctx).await?;
-            return Ok((response, true));
+            return self.inner.handle(request, ctx).await;
         }
 
         let (parts, body) = request.into_parts();
         match body.decode_content(content_encoding).await {
             Ok(decodec_data) => {
                 let req = Request::from_parts(parts, B::fixed_body(Some(decodec_data)));
-                let (mut response, _) = self.inner.handle(req, ctx).await?;
+                let mut response = self.inner.handle(req, ctx).await?;
                 if accept_encoding != "identity" {
                     let (parts, body) = response.into_parts();
                     match body.encode_content(accept_encoding).await {
@@ -154,18 +153,15 @@ where
                         }
                         Err(e) => {
                             tracing::error!("Response content encoding failed {e:?}");
-                            return Ok((
-                                generate_response(StatusCode::INTERNAL_SERVER_ERROR, false),
-                                true,
-                            ));
+                            return Ok(generate_empty_response(StatusCode::INTERNAL_SERVER_ERROR));
                         }
                     }
                 }
-                Ok((response, true))
+                Ok(response)
             }
             Err(e) => {
                 tracing::error!("Request content decode failed {e:?}");
-                Ok((generate_response(StatusCode::BAD_REQUEST, false), true))
+                Ok(generate_empty_response(StatusCode::BAD_REQUEST))
             }
         }
     }

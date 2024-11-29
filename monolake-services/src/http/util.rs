@@ -2,7 +2,7 @@ use std::{future::Future, task::Poll};
 
 use http::{HeaderValue, Request, Response, StatusCode};
 use monoio_http::common::body::FixedBody;
-use monolake_core::http::{HttpError, HttpHandler, ResponseWithContinue};
+use monolake_core::http::{HttpError, HttpHandler};
 use service_async::Service;
 
 pin_project_lite::pin_project! {
@@ -88,6 +88,7 @@ impl<FMAIN, FACC, T> AccompanyPair<FMAIN, FACC, T> {
     }
 }
 
+// TODO: remove
 pub(crate) fn generate_response<B: FixedBody>(status_code: StatusCode, close: bool) -> Response<B> {
     let mut resp = Response::builder();
     resp = resp.status(status_code);
@@ -99,13 +100,20 @@ pub(crate) fn generate_response<B: FixedBody>(status_code: StatusCode, close: bo
     resp.body(B::fixed_body(None)).unwrap()
 }
 
+pub(crate) fn generate_empty_response<B: FixedBody>(status_code: StatusCode) -> Response<B> {
+    Response::builder()
+        .status(status_code)
+        .body(B::fixed_body(None))
+        .unwrap()
+}
+
 pub struct HttpErrorResponder<T>(pub T);
 impl<CX, T, B> Service<(Request<B>, CX)> for HttpErrorResponder<T>
 where
     T: HttpHandler<CX, B>,
     T::Error: HttpError<T::Body>,
 {
-    type Response = ResponseWithContinue<T::Body>;
+    type Response = Response<T::Body>;
     type Error = T::Error;
 
     async fn call(&self, (req, cx): (Request<B>, CX)) -> Result<Self::Response, Self::Error> {
@@ -113,7 +121,7 @@ where
             Ok(resp) => Ok(resp),
             Err(e) => {
                 if let Some(r) = e.to_response() {
-                    Ok((r, true))
+                    Ok(r)
                 } else {
                     Err(e)
                 }

@@ -100,7 +100,7 @@
 use http::{uri::Scheme, HeaderValue, Request, Response, StatusCode};
 use monoio_http::common::body::FixedBody;
 use monolake_core::{
-    http::{HttpError, HttpFatalError, HttpHandler, ResponseWithContinue},
+    http::{HttpError, HttpHandler},
     util::uri_serde,
     AnyError,
 };
@@ -115,7 +115,7 @@ use crate::{
         IntoWeightedEndpoint, LoadBalanceError, LoadBalanceStrategy, LoadBalancer, Mapping, Select,
         ServiceRouter,
     },
-    http::{generate_response, util::HttpErrorResponder},
+    http::util::{generate_empty_response, HttpErrorResponder},
 };
 
 #[derive(Debug)]
@@ -146,8 +146,9 @@ pub enum RouterError<E> {
 }
 
 impl<B: FixedBody, E> HttpError<B> for RouterError<E> {
+    #[inline]
     fn to_response(&self) -> Option<Response<B>> {
-        Some(generate_response(StatusCode::NOT_FOUND, false))
+        Some(generate_empty_response(StatusCode::NOT_FOUND))
     }
 }
 
@@ -182,8 +183,8 @@ impl<'a, H, CX, B> Service<(Request<B>, &'a Endpoint, CX)> for RewriteHandler<H>
 where
     H: HttpHandler<CX, B>,
 {
-    type Response = ResponseWithContinue<H::Body>;
-    type Error = HttpFatalError<H::Error>;
+    type Response = Response<H::Body>;
+    type Error = H::Error;
 
     #[inline]
     async fn call(
@@ -191,7 +192,7 @@ where
         (mut request, ep, cx): (Request<B>, &'a Endpoint, CX),
     ) -> Result<Self::Response, Self::Error> {
         rewrite_request(&mut request, ep);
-        return self.inner.handle(request, cx).await.map_err(HttpFatalError);
+        return self.inner.handle(request, cx).await;
     }
 }
 

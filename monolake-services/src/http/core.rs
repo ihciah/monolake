@@ -68,7 +68,7 @@ use std::{convert::Infallible, fmt::Debug, pin::Pin, time::Duration};
 use bytes::Bytes;
 use certain_map::{Attach, Fork};
 use futures::{stream::FuturesUnordered, StreamExt};
-use http::StatusCode;
+use http::{Request, StatusCode};
 use monoio::io::{sink::SinkExt, stream::Stream, AsyncReadRent, AsyncWriteRent, Split, Splitable};
 use monoio_http::{
     common::{
@@ -83,7 +83,7 @@ use monoio_http::{
 };
 use monolake_core::{
     context::PeerAddr,
-    http::{HttpAccept, HttpHandler},
+    http::{HttpAccept, ResponseWithContinue},
     AnyError,
 };
 use service_async::{
@@ -93,6 +93,7 @@ use service_async::{
 use tracing::{error, info, warn};
 
 use super::{generate_response, util::AccompanyPair};
+use crate::http::util::generate_empty_response;
 
 /// Core HTTP service handler supporting both HTTP/1.1 and HTTP/2 protocols.
 ///
@@ -120,10 +121,9 @@ impl<H> HttpCoreService<H> {
         CXIn: ParamRef<PeerAddr> + Fork<Store = CXStore, State = CXState>,
         CXStore: 'static,
         for<'a> CXState: Attach<CXStore>,
-        for<'a> H: HttpHandler<
-            <CXState as Attach<CXStore>>::Hdr<'a>,
-            HttpBody,
-            Body = HttpBody,
+        for<'a> H: Service<
+            (Request<HttpBody>, <CXState as Attach<CXStore>>::Hdr<'a>),
+            Response = ResponseWithContinue<HttpBody>,
             Error = Err,
         >,
         Err: Into<AnyError> + Debug,
@@ -176,12 +176,12 @@ impl<H> HttpCoreService<H> {
             // handle request and reply response
             // 1. do these things simultaneously: read body and send + handle request
             let mut acc_fut = AccompanyPair::new(
-                self.handler_chain.handle(req, forked_ctx),
+                self.handler_chain.call((req, forked_ctx)),
                 decoder.fill_payload(),
             );
             let res = unsafe { Pin::new_unchecked(&mut acc_fut) }.await;
             match res {
-                Ok((resp, should_cont)) => {
+                Ok((resp, reuse)) => {
                     // 2. do these things simultaneously: read body and send + handle response
                     let mut f = acc_fut.replace(encoder.send_and_flush(resp));
                     match self.http_timeout.read_body_timeout {
@@ -213,11 +213,11 @@ impl<H> HttpCoreService<H> {
                         }
                     }
 
-                    if !should_cont {
-                        break;
-                    }
                     if let Err(e) = f.into_accompany().await {
                         warn!("error when decode request body: {e}");
+                        break;
+                    }
+                    if !reuse {
                         break;
                     }
                 }
@@ -225,9 +225,8 @@ impl<H> HttpCoreService<H> {
                     // something error when process request(not a biz error)
                     error!("error when processing request: {e:?}");
                     if let Err(e) = encoder
-                        .send_and_flush(generate_response::<HttpBody>(
+                        .send_and_flush(generate_empty_response::<HttpBody>(
                             StatusCode::INTERNAL_SERVER_ERROR,
-                            true,
                         ))
                         .await
                     {
@@ -289,10 +288,9 @@ impl<H> HttpCoreService<H> {
         CXIn: ParamRef<PeerAddr> + Fork<Store = CXStore, State = CXState>,
         CXStore: 'static,
         for<'a> CXState: Attach<CXStore>,
-        for<'a> H: HttpHandler<
-            <CXState as Attach<CXStore>>::Hdr<'a>,
-            HttpBody,
-            Body = HttpBody,
+        for<'a> H: Service<
+            (Request<HttpBody>, <CXState as Attach<CXStore>>::Hdr<'a>),
+            Response = ResponseWithContinue<HttpBody>,
             Error = Err,
         >,
         Err: Into<AnyError> + Debug,
@@ -342,7 +340,7 @@ impl<H> HttpCoreService<H> {
                         let (mut store, state) = ctx.fork();
                         backend_resp_stream.push(async move {
                             let forked_ctx = unsafe { state.attach(&mut store) };
-                            (self.handler_chain.handle(request, forked_ctx).await, response_handle)
+                            (self.handler_chain.call((request, forked_ctx)).await, response_handle)
                         });
                  }
                  Some(result) = backend_resp_stream.next() => {
@@ -375,14 +373,20 @@ impl<H> HttpCoreService<H> {
     }
 }
 
+// HttpCoreService requires inner service's response to be ResponseWithContinue<HttpBody>.
+// The inner service must tell HttpCoreService whether to continue processing the connection.
+// We provide an implementation named `ConnectionReuseHandler`.
 impl<H, Stream, CXIn, CXStore, CXState, Err> Service<HttpAccept<Stream, CXIn>>
     for HttpCoreService<H>
 where
     CXIn: ParamRef<PeerAddr> + Fork<Store = CXStore, State = CXState>,
     CXStore: 'static,
     for<'a> CXState: Attach<CXStore>,
-    for<'a> H:
-        HttpHandler<<CXState as Attach<CXStore>>::Hdr<'a>, HttpBody, Body = HttpBody, Error = Err>,
+    for<'a> H: Service<
+        (Request<HttpBody>, <CXState as Attach<CXStore>>::Hdr<'a>),
+        Response = ResponseWithContinue<HttpBody>,
+        Error = Err,
+    >,
     Stream: Split + AsyncReadRent + AsyncWriteRent + Unpin + 'static,
     Err: Into<AnyError> + Debug,
 {

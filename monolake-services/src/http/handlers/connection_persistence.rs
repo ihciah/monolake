@@ -70,12 +70,11 @@
 //! - Efficient header manipulation to minimize overhead
 //! - Optimized handling for HTTP/2, which has built-in connection persistence
 use http::{Request, Version};
-use monolake_core::http::{HttpHandler, ResponseWithContinue};
+use monolake_core::http::{HttpError, HttpHandler, ResponseWithContinue};
 use service_async::{
     layer::{layer_fn, FactoryLayer},
     AsyncMakeService, MakeService, Service,
 };
-use tracing::debug;
 
 use crate::http::{CLOSE, CLOSE_VALUE, KEEPALIVE, KEEPALIVE_VALUE};
 
@@ -96,6 +95,7 @@ pub struct ConnectionReuseHandler<H> {
 impl<H, CX, B> Service<(Request<B>, CX)> for ConnectionReuseHandler<H>
 where
     H: HttpHandler<CX, B>,
+    H::Error: HttpError<H::Body>,
 {
     type Response = ResponseWithContinue<H::Body>;
     type Error = H::Error;
@@ -104,61 +104,136 @@ where
         &self,
         (mut request, ctx): (Request<B>, CX),
     ) -> Result<Self::Response, Self::Error> {
-        let version = request.version();
-        let keepalive = is_conn_keepalive(request.headers(), version);
-        debug!("frontend keepalive {:?}", keepalive);
-
-        match version {
+        match request.version() {
             // for http 1.0, hack it to 1.1 like setting nginx `proxy_http_version` to 1.1
             Version::HTTP_10 => {
-                // modify to 1.1 and remove connection header
+                // get and remove connection header
+                let mut keepalive = false;
+                let conn_header_val = request.headers_mut().remove(http::header::CONNECTION);
+                if matches!(conn_header_val, Some(v) if v.as_bytes().eq_ignore_ascii_case(KEEPALIVE.as_bytes()))
+                {
+                    keepalive = true;
+                }
+
+                // modify to 1.1
                 *request.version_mut() = Version::HTTP_11;
-                let _ = request.headers_mut().remove(http::header::CONNECTION);
 
-                // send
-                let (mut response, mut cont) = self.inner.handle(request, ctx).await?;
-                cont &= keepalive;
+                // send http 1.1 request
+                let maybe_response = self.inner.handle(request, ctx).await;
+                let mut response = match maybe_response {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return match e.to_response() {
+                            // if recoverable, return generated http 1.0 response with keepalive
+                            // TODO(ihciah): Note: the caller should insert keepalive header if
+                            // needed
+                            Some(mut resp) => {
+                                if keepalive {
+                                    resp.headers_mut()
+                                        .insert(http::header::CONNECTION, KEEPALIVE_VALUE);
+                                }
+                                *resp.version_mut() = Version::HTTP_10;
+                                Ok((resp, keepalive))
+                            }
+                            None => Err(e),
+                        };
+                    }
+                };
 
-                // modify back and make sure reply keepalive if client want it and server
-                // support it.
-                let _ = response.headers_mut().remove(http::header::CONNECTION);
-                if cont {
-                    // insert keepalive header
+                // modify to 1.0
+                *response.version_mut() = Version::HTTP_10;
+
+                // insert keepalive header if needed
+                if keepalive {
                     response
                         .headers_mut()
                         .insert(http::header::CONNECTION, KEEPALIVE_VALUE);
-                }
-                *response.version_mut() = version;
-
-                Ok((response, cont))
-            }
-            Version::HTTP_11 => {
-                // remove connection header
-                let _ = request.headers_mut().remove(http::header::CONNECTION);
-
-                // send
-                let (mut response, mut cont) = self.inner.handle(request, ctx).await?;
-                cont &= keepalive;
-
-                // modify back and make sure reply keepalive if client want it and server
-                // support it.
-                let _ = response.headers_mut().remove(http::header::CONNECTION);
-                if !cont {
-                    // insert close header
+                } else {
                     response
                         .headers_mut()
                         .insert(http::header::CONNECTION, CLOSE_VALUE);
                 }
-                Ok((response, cont))
+
+                Ok((response, keepalive))
+            }
+            Version::HTTP_11 => {
+                // get and remove connection header
+                let mut keepalive = true;
+                let conn_header_val = request.headers_mut().remove(http::header::CONNECTION);
+                if matches!(conn_header_val, Some(v) if v.as_bytes().eq_ignore_ascii_case(CLOSE.as_bytes()))
+                {
+                    keepalive = false;
+                }
+
+                // send http 1.1 request
+                let mut response = match self.inner.handle(request, ctx).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return match e.to_response() {
+                            // if recoverable, return generated http 1.1 response with keepalive
+                            Some(mut resp) => {
+                                if !keepalive {
+                                    resp.headers_mut()
+                                        .insert(http::header::CONNECTION, CLOSE_VALUE);
+                                }
+                                Ok((resp, keepalive))
+                            }
+                            None => Err(e),
+                        };
+                    }
+                };
+
+                // insert keepalive header if needed
+                if keepalive {
+                    response
+                        .headers_mut()
+                        .insert(http::header::CONNECTION, KEEPALIVE_VALUE);
+                } else {
+                    response
+                        .headers_mut()
+                        .insert(http::header::CONNECTION, CLOSE_VALUE);
+                }
+
+                Ok((response, keepalive))
             }
             Version::HTTP_2 => {
-                let (response, _) = self.inner.handle(request, ctx).await?;
+                let response = match self.inner.handle(request, ctx).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return match e.to_response() {
+                            // if recoverable, return generated http 1.1 response with keepalive
+                            Some(mut resp) => {
+                                *resp.version_mut() = Version::HTTP_2;
+                                // keepalive is always true for http2
+                                Ok((resp, true))
+                            }
+                            None => Err(e),
+                        };
+                    }
+                };
                 Ok((response, true))
             }
-            // for http 0.9 and other versions, just relay it
-            _ => {
-                let (response, _) = self.inner.handle(request, ctx).await?;
+            // for http 0.9, just relay it
+            Version::HTTP_09 => {
+                let response = match self.inner.handle(request, ctx).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return match e.to_response() {
+                            // if recoverable, return generated http 1.1 response with keepalive
+                            Some(mut resp) => {
+                                *resp.version_mut() = Version::HTTP_09;
+                                Ok((resp, false))
+                            }
+                            None => Err(e),
+                        };
+                    }
+                };
                 Ok((response, false))
+            }
+            _ => {
+                // we haven't support h3 yet.
+                let response = self.inner.handle(request, ctx).await?;
+                Ok((response, true))
             }
         }
     }
@@ -193,22 +268,5 @@ impl<F: AsyncMakeService> AsyncMakeService for ConnectionReuseHandler<F> {
 impl<F> ConnectionReuseHandler<F> {
     pub fn layer<C>() -> impl FactoryLayer<C, F, Factory = Self> {
         layer_fn(|_: &C, inner| Self { inner })
-    }
-}
-
-fn is_conn_keepalive(headers: &http::HeaderMap<http::HeaderValue>, version: Version) -> bool {
-    match (version, headers.get(http::header::CONNECTION)) {
-        (Version::HTTP_10, Some(header))
-            if header.as_bytes().eq_ignore_ascii_case(KEEPALIVE.as_bytes()) =>
-        {
-            true
-        }
-        (Version::HTTP_11, None) => true,
-        (Version::HTTP_11, Some(header))
-            if !header.as_bytes().eq_ignore_ascii_case(CLOSE.as_bytes()) =>
-        {
-            true
-        }
-        _ => false,
     }
 }

@@ -13,7 +13,7 @@ use monoio_transports::{
     connectors::{Connector, TcpConnector, TcpTlsAddr, TlsConnector, TlsStream},
     http::H1Connector,
 };
-use monolake_core::http::{HttpHandler, ResponseWithContinue};
+use monolake_core::http::HttpHandler;
 #[allow(unused)]
 use openidconnect::core::{
     CoreAuthDisplay, CoreClaimName, CoreClaimType, CoreClient, CoreClientAuthMethod,
@@ -38,7 +38,7 @@ use thiserror::Error;
 use tracing::debug;
 use url::Url;
 
-use crate::http::generate_response;
+use crate::http::util::generate_empty_response;
 
 type HttpsConnector = H1Connector<TlsConnector<TcpConnector>, TcpTlsAddr, TlsStream<TcpStream>>;
 
@@ -198,7 +198,7 @@ where
     H: HttpHandler<CX, B>,
     H::Body: FixedBody,
 {
-    type Response = ResponseWithContinue<H::Body>;
+    type Response = Response<H::Body>;
     type Error = H::Error;
 
     async fn call(&self, (request, ctx): (Request<B>, CX)) -> Result<Self::Response, Self::Error> {
@@ -299,7 +299,7 @@ where
                         access_token: None,
                     },
                 );
-                return Ok((redirect_response, false));
+                return Ok(redirect_response);
             }
             let session_store = SESSION_STORE.read().unwrap();
             let (_, code_val) = code_pair.clone().unwrap();
@@ -324,7 +324,7 @@ where
                         access_token: None,
                     },
                 );
-                return Ok((redirect_response, false));
+                return Ok(redirect_response);
             }
             nonce = session_store
                 .get(&state_val.to_string())
@@ -380,23 +380,17 @@ where
         }
 
         match self.inner.handle(request, ctx).await {
-            Ok((mut response, cont)) => {
+            Ok(mut response) => {
                 let headers = response.headers_mut();
                 // Use the state number (csrf) as the session-id for future auth. Need to add
                 // more cookies like expiration time.
-                headers.insert(http::header::SET_COOKIE, unsafe {
-                    HeaderValue::from_maybe_shared_unchecked(format!(
-                        "{}={}",
-                        "session-id",
-                        state.secret()
-                    ))
-                });
-                Ok((response, cont))
+                headers.insert(
+                    http::header::SET_COOKIE,
+                    HeaderValue::from_str(&format!("session-id={}", state.secret())).unwrap(),
+                );
+                Ok(response)
             }
-            Err(_e) => Ok((
-                generate_response(StatusCode::INTERNAL_SERVER_ERROR, false),
-                false,
-            )),
+            Err(_e) => Ok(generate_empty_response(StatusCode::INTERNAL_SERVER_ERROR)),
         }
     }
 }
